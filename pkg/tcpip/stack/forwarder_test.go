@@ -121,9 +121,11 @@ func (*fwdTestNetworkEndpoint) Close() {}
 type fwdTestNetworkProtocol struct {
 	addrCache              *linkAddrCache
 	addrResolveDelay       time.Duration
-	onLinkAddressResolved  func(cache *linkAddrCache, addr tcpip.Address)
+	onLinkAddressResolved  func(cache *linkAddrCache, addr tcpip.Address, _ tcpip.LinkAddress)
 	onResolveStaticAddress func(tcpip.Address) (tcpip.LinkAddress, bool)
 }
+
+var _ LinkAddressResolver = (*fwdTestNetworkProtocol)(nil)
 
 func (f *fwdTestNetworkProtocol) Number() tcpip.NetworkProtocolNumber {
 	return fwdTestNetNumber
@@ -174,10 +176,10 @@ func (f *fwdTestNetworkProtocol) Close() {}
 
 func (f *fwdTestNetworkProtocol) Wait() {}
 
-func (f *fwdTestNetworkProtocol) LinkAddressRequest(addr, localAddr tcpip.Address, linkEP LinkEndpoint) *tcpip.Error {
+func (f *fwdTestNetworkProtocol) LinkAddressRequest(addr, localAddr tcpip.Address, remoteLinkAddr tcpip.LinkAddress, linkEP LinkEndpoint) *tcpip.Error {
 	if f.addrCache != nil && f.onLinkAddressResolved != nil {
 		time.AfterFunc(f.addrResolveDelay, func() {
-			f.onLinkAddressResolved(f.addrCache, addr)
+			f.onLinkAddressResolved(f.addrCache, addr, remoteLinkAddr)
 		})
 	}
 	return nil
@@ -400,7 +402,7 @@ func TestForwardingWithFakeResolver(t *testing.T) {
 	// Create a network protocol with a fake resolver.
 	proto := &fwdTestNetworkProtocol{
 		addrResolveDelay: 500 * time.Millisecond,
-		onLinkAddressResolved: func(cache *linkAddrCache, addr tcpip.Address) {
+		onLinkAddressResolved: func(cache *linkAddrCache, addr tcpip.Address, _ tcpip.LinkAddress) {
 			// Any address will be resolved to the link address "c".
 			cache.add(tcpip.FullAddress{NIC: 2, Addr: addr}, "c")
 		},
@@ -458,7 +460,7 @@ func TestForwardingWithFakeResolverPartialTimeout(t *testing.T) {
 	// Create a network protocol with a fake resolver.
 	proto := &fwdTestNetworkProtocol{
 		addrResolveDelay: 500 * time.Millisecond,
-		onLinkAddressResolved: func(cache *linkAddrCache, addr tcpip.Address) {
+		onLinkAddressResolved: func(cache *linkAddrCache, addr tcpip.Address, _ tcpip.LinkAddress) {
 			// Only packets to address 3 will be resolved to the
 			// link address "c".
 			if addr == "\x03" {
@@ -510,7 +512,7 @@ func TestForwardingWithFakeResolverTwoPackets(t *testing.T) {
 	// Create a network protocol with a fake resolver.
 	proto := &fwdTestNetworkProtocol{
 		addrResolveDelay: 500 * time.Millisecond,
-		onLinkAddressResolved: func(cache *linkAddrCache, addr tcpip.Address) {
+		onLinkAddressResolved: func(cache *linkAddrCache, addr tcpip.Address, _ tcpip.LinkAddress) {
 			// Any packets will be resolved to the link address "c".
 			cache.add(tcpip.FullAddress{NIC: 2, Addr: addr}, "c")
 		},
@@ -554,7 +556,7 @@ func TestForwardingWithFakeResolverManyPackets(t *testing.T) {
 	// Create a network protocol with a fake resolver.
 	proto := &fwdTestNetworkProtocol{
 		addrResolveDelay: 500 * time.Millisecond,
-		onLinkAddressResolved: func(cache *linkAddrCache, addr tcpip.Address) {
+		onLinkAddressResolved: func(cache *linkAddrCache, addr tcpip.Address, _ tcpip.LinkAddress) {
 			// Any packets will be resolved to the link address "c".
 			cache.add(tcpip.FullAddress{NIC: 2, Addr: addr}, "c")
 		},
@@ -611,7 +613,7 @@ func TestForwardingWithFakeResolverManyResolutions(t *testing.T) {
 	// Create a network protocol with a fake resolver.
 	proto := &fwdTestNetworkProtocol{
 		addrResolveDelay: 500 * time.Millisecond,
-		onLinkAddressResolved: func(cache *linkAddrCache, addr tcpip.Address) {
+		onLinkAddressResolved: func(cache *linkAddrCache, addr tcpip.Address, _ tcpip.LinkAddress) {
 			// Any packets will be resolved to the link address "c".
 			cache.add(tcpip.FullAddress{NIC: 2, Addr: addr}, "c")
 		},
