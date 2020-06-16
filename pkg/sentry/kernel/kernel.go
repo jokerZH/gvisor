@@ -1460,13 +1460,9 @@ func (k *Kernel) NowNanoseconds() int64 {
 	return now
 }
 
-// NowMonotonic implements tcpip.Clock.NowMonotonic.
-func (k *Kernel) NowMonotonic() int64 {
-	now, err := k.timekeeper.GetTime(sentrytime.Monotonic)
-	if err != nil {
-		panic("Kernel.NowMonotonic: " + err.Error())
-	}
-	return now
+// AfterFunc implements tcpip.Clock.AfterFunc.
+func (k *Kernel) AfterFunc(d time.Duration, f func()) tcpip.Timer {
+	return ktime.AfterFunc(k.realtimeClock, d, f)
 }
 
 // SetMemoryFile sets Kernel.mf. SetMemoryFile must be called before Init or

@@ -477,6 +477,19 @@ func After(clock Clock, duration time.Duration) (*Timer, Time, <-chan struct{}) 
 	return t, now, tchan
 }
 
+// AfterFunc waits for the duration to elapse according to clock then runs fn.
+// The timer is started immediately and will fire exactly once.
+//
+// Callers must call ResettableTimer.Destroy.
+func AfterFunc(clock Clock, duration time.Duration, fn func()) *ResettableTimer {
+	timer := &ResettableTimer{
+		clock: clock,
+		fn:    fn,
+	}
+	timer.Reset(duration)
+	return timer
+}
+
 // init initializes Timer state that is not preserved across save/restore. If
 // init has already been called, calling it again is a no-op.
 //
@@ -675,6 +688,59 @@ func (t *Timer) Clock() Clock {
 	return t.clock
 }
 
+// ResettableTimer is a resettable timer with variable duration expirations.
+// Must be created by AfterFunc.
+type ResettableTimer struct {
+	// clock is the time source. clock is immutable.
+	clock Clock
+
+	// fn is called when the Timer expires. fn is immutable.
+	fn func()
+
+	// mu protects t.
+	mu sync.Mutex
+
+	// t stores the latest running Timer. This is replaced whenever Reset is
+	// called since Timer cannot be restarted once it has been Destroyed by Stop.
+	//
+	// This field is nil iff Stop has been called.
+	t *Timer
+}
+
+// Stop implements tcpip.Timer.Stop.
+func (r *ResettableTimer) Stop() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.t == nil {
+		return false
+	}
+
+	r.t.Destroy()
+	r.t = nil
+	return true
+}
+
+// Reset implements tcpip.Timer.Reset.
+func (r *ResettableTimer) Reset(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.t == nil {
+		notifier := NewFunctionNotifier(func() {
+			r.Stop()
+			r.fn()
+		})
+		r.t = NewTimer(r.clock, notifier)
+	}
+
+	r.t.Swap(Setting{
+		Enabled: true,
+		Period:  0,
+		Next:    r.clock.Now().Add(d),
+	})
+}
+
 // ChannelNotifier is a TimerListener that sends a message on an empty struct
 // channel.
 //
@@ -707,3 +773,24 @@ func (c *ChannelNotifier) Notify(uint64, Setting) (Setting, bool) {
 func (c *ChannelNotifier) Destroy() {
 	close(c.tchan)
 }
+
+// FunctionNotifier is a TimerListener that runs a function.
+//
+// FunctionNotifier cannot be saved or loaded.
+type FunctionNotifier struct {
+	fn func()
+}
+
+// NewFunctionNotifier creates a new function notifier.
+func NewFunctionNotifier(fn func()) TimerListener {
+	return &FunctionNotifier{fn}
+}
+
+// Notify implements ktime.TimerListener.Notify.
+func (f *FunctionNotifier) Notify(uint64, Setting) (Setting, bool) {
+	f.fn()
+	return Setting{}, false
+}
+
+// Destroy implements ktime.TimerListener.Destroy.
+func (f *FunctionNotifier) Destroy() {}
