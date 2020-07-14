@@ -14,6 +14,14 @@
 
 package linux
 
+import (
+	"io"
+
+	"gvisor.dev/gvisor/pkg/usermem"
+	"gvisor.dev/gvisor/tools/go_marshal/marshal"
+	"gvisor.dev/gvisor/tools/go_marshal/primitive"
+)
+
 // This file contains structures required to support netfilter, specifically
 // the iptables tool.
 
@@ -76,6 +84,8 @@ const (
 
 // IPTEntry is an iptable rule. It corresponds to struct ipt_entry in
 // include/uapi/linux/netfilter_ipv4/ip_tables.h.
+//
+// +marshal
 type IPTEntry struct {
 	// IP is used to filter packets based on the IP header.
 	IP IPTIP
@@ -115,18 +125,91 @@ const SizeOfIPTEntry = 112
 // KernelIPTEntry is identical to IPTEntry, but includes the Elems field. This
 // struct marshaled via the binary package to write an IPTEntry to userspace.
 type KernelIPTEntry struct {
-	IPTEntry
+	Entry IPTEntry
 
 	// Elems holds the data for all this rule's matches followed by the
 	// target. It is variable length -- users have to iterate over any
 	// matches and use TargetOffset and NextOffset to make sense of the
 	// data.
-	Elems []byte
+	Elems primitive.ByteSlice
 }
+
+// SizeBytes implements marshal.Marshallable.SizeBytes.
+func (ke *KernelIPTEntry) SizeBytes() int {
+	return ke.Entry.SizeBytes() + ke.Elems.SizeBytes()
+}
+
+// MarshalBytes implements marshal.Marshallable.MarshalBytes.
+func (ke *KernelIPTEntry) MarshalBytes(dst []byte) {
+	ke.Entry.MarshalBytes(dst)
+	marshalledUntil := ke.Entry.SizeBytes()
+	if marshalledUntil < len(dst) {
+		ke.Elems.MarshalBytes(dst[marshalledUntil:])
+	}
+}
+
+// UnmarshalBytes implements marshal.Marshallable.UnmarshalBytes.
+func (ke *KernelIPTEntry) UnmarshalBytes(src []byte) {
+	ke.Entry.UnmarshalBytes(src)
+	marshalledUntil := ke.Entry.SizeBytes()
+	if marshalledUntil < len(src) {
+		ke.Elems.UnmarshalBytes(src[marshalledUntil:])
+	}
+}
+
+// Packed implements marshal.Marshallable.Packed.
+func (ke *KernelIPTEntry) Packed() bool {
+	return false
+}
+
+// MarshalUnsafe implements marshal.Marshallable.MarshalUnsafe.
+func (ke *KernelIPTEntry) MarshalUnsafe(dst []byte) {
+	ke.MarshalBytes(dst)
+}
+
+// UnmarshalUnsafe implements marshal.Marshallable.UnmarshalUnsafe.
+func (ke *KernelIPTEntry) UnmarshalUnsafe(src []byte) {
+	ke.UnmarshalBytes(src)
+}
+
+// CopyIn implements marshal.Marshallable.CopyIn.
+func (ke *KernelIPTEntry) CopyIn(task marshal.Task, addr usermem.Addr) (int, error) {
+	buf := task.CopyScratchBuffer(ke.SizeBytes()) // escapes: okay.
+	length, err := task.CopyInBytes(addr, buf)    // escapes: okay.
+	// Unmarshal unconditionally. If we had a short copy-in, this results in a
+	// partially unmarshalled struct.
+	ke.UnmarshalBytes(buf) // escapes: fallback.
+	return length, err
+}
+
+// CopyOut implements marshal.Marshallable.CopyOut.
+func (ke *KernelIPTEntry) CopyOut(task marshal.Task, addr usermem.Addr) (int, error) {
+	return ke.CopyOutN(task, addr, ke.SizeBytes())
+}
+
+// CopyOutN implements marshal.Marshallable.CopyOutN.
+func (ke *KernelIPTEntry) CopyOutN(task marshal.Task, addr usermem.Addr, limit int) (int, error) {
+	// Type Stat doesn't have a packed layout in memory, fall back to MarshalBytes.
+	buf := task.CopyScratchBuffer(limit) // escapes: okay.
+	ke.MarshalBytes(buf)                 // escapes: fallback.
+	return task.CopyOutBytes(addr, buf)  // escapes: okay.
+}
+
+// WriteTo implements io.WriterTo.WriteTo.
+func (ke *KernelIPTEntry) WriteTo(w io.Writer) (int64, error) {
+	buf := make([]byte, ke.SizeBytes())
+	ke.MarshalBytes(buf)
+	length, err := w.Write(buf)
+	return int64(length), err
+}
+
+var _ marshal.Marshallable = (*KernelIPTEntry)(nil)
 
 // IPTIP contains information for matching a packet's IP header.
 // It corresponds to struct ipt_ip in
 // include/uapi/linux/netfilter_ipv4/ip_tables.h.
+//
+// +marshal
 type IPTIP struct {
 	// Src is the source IP address.
 	Src InetAddr
@@ -189,6 +272,8 @@ const SizeOfIPTIP = 84
 
 // XTCounters holds packet and byte counts for a rule. It corresponds to struct
 // xt_counters in include/uapi/linux/netfilter/x_tables.h.
+//
+// +marshal
 type XTCounters struct {
 	// Pcnt is the packet count.
 	Pcnt uint64
@@ -321,6 +406,8 @@ const SizeOfXTRedirectTarget = 56
 
 // IPTGetinfo is the argument for the IPT_SO_GET_INFO sockopt. It corresponds
 // to struct ipt_getinfo in include/uapi/linux/netfilter_ipv4/ip_tables.h.
+//
+// +marshal
 type IPTGetinfo struct {
 	Name       TableName
 	ValidHooks uint32
@@ -336,6 +423,8 @@ const SizeOfIPTGetinfo = 84
 // IPTGetEntries is the argument for the IPT_SO_GET_ENTRIES sockopt. It
 // corresponds to struct ipt_get_entries in
 // include/uapi/linux/netfilter_ipv4/ip_tables.h.
+//
+// +marshal
 type IPTGetEntries struct {
 	Name TableName
 	Size uint32
@@ -352,10 +441,89 @@ const SizeOfIPTGetEntries = 40
 // KernelIPTGetEntries is identical to IPTGetEntries, but includes the
 // Entrytable field. This struct marshaled via the binary package to write an
 // KernelIPTGetEntries to userspace.
+// KernelIPTGetEntries has been manually made marshal.Marshallable since it is
+// dynamically sized.
 type KernelIPTGetEntries struct {
 	IPTGetEntries
 	Entrytable []KernelIPTEntry
 }
+
+// SizeBytes implements marshal.Marshallable.SizeBytes.
+func (ke *KernelIPTGetEntries) SizeBytes() int {
+	res := ke.IPTGetEntries.SizeBytes()
+	for _, entry := range ke.Entrytable {
+		res += entry.SizeBytes()
+	}
+	return res
+}
+
+// MarshalBytes implements marshal.Marshallable.MarshalBytes.
+func (ke *KernelIPTGetEntries) MarshalBytes(dst []byte) {
+	ke.IPTGetEntries.MarshalBytes(dst)
+	marshalledUntil := ke.IPTGetEntries.SizeBytes()
+	for i := 0; i < len(ke.Entrytable) && marshalledUntil < len(dst); i++ {
+		ke.Entrytable[i].MarshalBytes(dst[marshalledUntil:])
+		marshalledUntil += ke.Entrytable[i].SizeBytes()
+	}
+}
+
+// UnmarshalBytes implements marshal.Marshallable.UnmarshalBytes.
+func (ke *KernelIPTGetEntries) UnmarshalBytes(src []byte) {
+	ke.IPTGetEntries.UnmarshalBytes(src)
+	unmarshalledUntil := ke.IPTGetEntries.SizeBytes()
+	for i := 0; i < len(ke.Entrytable) && unmarshalledUntil < len(src); i++ {
+		ke.Entrytable[i].UnmarshalBytes(src[unmarshalledUntil:])
+		unmarshalledUntil += ke.Entrytable[i].SizeBytes()
+	}
+}
+
+// Packed implements marshal.Marshallable.Packed.
+func (ke *KernelIPTGetEntries) Packed() bool {
+	return false
+}
+
+// MarshalUnsafe implements marshal.Marshallable.MarshalUnsafe.
+func (ke *KernelIPTGetEntries) MarshalUnsafe(dst []byte) {
+	ke.MarshalBytes(dst)
+}
+
+// UnmarshalUnsafe implements marshal.Marshallable.UnmarshalUnsafe.
+func (ke *KernelIPTGetEntries) UnmarshalUnsafe(src []byte) {
+	ke.UnmarshalBytes(src)
+}
+
+// CopyIn implements marshal.Marshallable.CopyIn.
+func (ke *KernelIPTGetEntries) CopyIn(task marshal.Task, addr usermem.Addr) (int, error) {
+	buf := task.CopyScratchBuffer(ke.SizeBytes()) // escapes: okay.
+	length, err := task.CopyInBytes(addr, buf)    // escapes: okay.
+	// Unmarshal unconditionally. If we had a short copy-in, this results in a
+	// partially unmarshalled struct.
+	ke.UnmarshalBytes(buf) // escapes: fallback.
+	return length, err
+}
+
+// CopyOut implements marshal.Marshallable.CopyOut.
+func (ke *KernelIPTGetEntries) CopyOut(task marshal.Task, addr usermem.Addr) (int, error) {
+	return ke.CopyOutN(task, addr, ke.SizeBytes())
+}
+
+// CopyOutN implements marshal.Marshallable.CopyOutN.
+func (ke *KernelIPTGetEntries) CopyOutN(task marshal.Task, addr usermem.Addr, limit int) (int, error) {
+	// Type Stat doesn't have a packed layout in memory, fall back to MarshalBytes.
+	buf := task.CopyScratchBuffer(limit) // escapes: okay.
+	ke.MarshalBytes(buf)                 // escapes: fallback.
+	return task.CopyOutBytes(addr, buf)  // escapes: okay.
+}
+
+// WriteTo implements io.WriterTo.WriteTo.
+func (ke *KernelIPTGetEntries) WriteTo(w io.Writer) (int64, error) {
+	buf := make([]byte, ke.SizeBytes())
+	ke.MarshalBytes(buf)
+	length, err := w.Write(buf)
+	return int64(length), err
+}
+
+var _ marshal.Marshallable = (*KernelIPTGetEntries)(nil)
 
 // IPTReplace is the argument for the IPT_SO_SET_REPLACE sockopt. It
 // corresponds to struct ipt_replace in
@@ -374,12 +542,6 @@ type IPTReplace struct {
 	// Entries [0]IPTEntry
 }
 
-// KernelIPTReplace is identical to IPTReplace, but includes the Entries field.
-type KernelIPTReplace struct {
-	IPTReplace
-	Entries [0]IPTEntry
-}
-
 // SizeOfIPTReplace is the size of an IPTReplace.
 const SizeOfIPTReplace = 96
 
@@ -392,6 +554,8 @@ func (en ExtensionName) String() string {
 }
 
 // TableName holds the name of a netfilter table.
+//
+// +marshal
 type TableName [XT_TABLE_MAXNAMELEN]byte
 
 // String implements fmt.Stringer.

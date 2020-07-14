@@ -17,9 +17,21 @@
 package primitive
 
 import (
+	"io"
+
 	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/tools/go_marshal/marshal"
 )
+
+// Int8 is a marshal.Marshallable implementation for int8.
+//
+// +marshal slice:Int8Slice:inner
+type Int8 int8
+
+// Uint8 is a marshal.Marshallable implementation for uint8.
+//
+// +marshal slice:Uint8Slice:inner
+type Uint8 uint8
 
 // Int16 is a marshal.Marshallable implementation for int16.
 //
@@ -50,6 +62,68 @@ type Int64 int64
 //
 // +marshal slice:Uint64Slice:inner
 type Uint64 uint64
+
+// ByteSlice is a marshal.Marshallable implementation for []byte.
+// This is a manual implementation for a dynamically-sized type, which leads
+// to the following constraints:
+//   - Structs with ByteSlice fields can not use the slice API because the
+//     slice API assumes that the type is of fixed size.
+//   - Can not name a ByteSlice field in a struct "_".
+//   - Can not have an array of ByteSlice in a struct.
+type ByteSlice []byte
+
+// SizeBytes implements marshal.Marshallable.SizeBytes.
+func (b *ByteSlice) SizeBytes() int {
+	return len(*b)
+}
+
+// MarshalBytes implements marshal.Marshallable.MarshalBytes.
+func (b *ByteSlice) MarshalBytes(dst []byte) {
+	copy(dst, *b)
+}
+
+// UnmarshalBytes implements marshal.Marshallable.UnmarshalBytes.
+func (b *ByteSlice) UnmarshalBytes(src []byte) {
+	copy(*b, src)
+}
+
+// Packed implements marshal.Marshallable.Packed.
+func (b *ByteSlice) Packed() bool {
+	return false
+}
+
+// MarshalUnsafe implements marshal.Marshallable.MarshalUnsafe.
+func (b *ByteSlice) MarshalUnsafe(dst []byte) {
+	b.MarshalBytes(dst)
+}
+
+// UnmarshalUnsafe implements marshal.Marshallable.UnmarshalUnsafe.
+func (b *ByteSlice) UnmarshalUnsafe(src []byte) {
+	b.UnmarshalBytes(src)
+}
+
+// CopyIn implements marshal.Marshallable.CopyIn.
+func (b *ByteSlice) CopyIn(task marshal.Task, addr usermem.Addr) (int, error) {
+	return task.CopyInBytes(addr, *b)
+}
+
+// CopyOut implements marshal.Marshallable.CopyOut.
+func (b *ByteSlice) CopyOut(task marshal.Task, addr usermem.Addr) (int, error) {
+	return task.CopyOutBytes(addr, *b)
+}
+
+// CopyOutN implements marshal.Marshallable.CopyOutN.
+func (b *ByteSlice) CopyOutN(task marshal.Task, addr usermem.Addr, limit int) (int, error) {
+	return task.CopyOutBytes(addr, (*b)[:limit])
+}
+
+// WriteTo implements io.WriterTo.WriteTo.
+func (b *ByteSlice) WriteTo(w io.Writer) (int64, error) {
+	n, err := w.Write(*b)
+	return int64(n), err
+}
+
+var _ marshal.Marshallable = (*ByteSlice)(nil)
 
 // Below, we define some convenience functions for marshalling primitive types
 // using the newtypes above, without requiring superfluous casts.
