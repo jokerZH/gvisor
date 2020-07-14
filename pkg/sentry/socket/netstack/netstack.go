@@ -61,6 +61,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"gvisor.dev/gvisor/tools/go_marshal/marshal"
+	"gvisor.dev/gvisor/tools/go_marshal/primitive"
 )
 
 func mustCreateMetric(name, description string) *tcpip.StatCounter {
@@ -909,7 +911,7 @@ func (s *socketOpsCommon) Shutdown(t *kernel.Task, how int) *syserr.Error {
 
 // GetSockOpt implements the linux syscall getsockopt(2) for sockets backed by
 // tcpip.Endpoint.
-func (s *SocketOperations) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.Addr, outLen int) (interface{}, *syserr.Error) {
+func (s *SocketOperations) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.Addr, outLen int) (marshal.Marshallable, *syserr.Error) {
 	// TODO(b/78348848): Unlike other socket options, SO_TIMESTAMP is
 	// implemented specifically for netstack.SocketOperations rather than
 	// commonEndpoint. commonEndpoint should be extended to support socket
@@ -919,25 +921,25 @@ func (s *SocketOperations) GetSockOpt(t *kernel.Task, level, name int, outPtr us
 		if outLen < sizeOfInt32 {
 			return nil, syserr.ErrInvalidArgument
 		}
-		val := int32(0)
+		val := primitive.Int32(0)
 		s.readMu.Lock()
 		defer s.readMu.Unlock()
 		if s.sockOptTimestamp {
 			val = 1
 		}
-		return val, nil
+		return &val, nil
 	}
 	if level == linux.SOL_TCP && name == linux.TCP_INQ {
 		if outLen < sizeOfInt32 {
 			return nil, syserr.ErrInvalidArgument
 		}
-		val := int32(0)
+		val := primitive.Int32(0)
 		s.readMu.Lock()
 		defer s.readMu.Unlock()
 		if s.sockOptInq {
 			val = 1
 		}
-		return val, nil
+		return &val, nil
 	}
 
 	if s.skType == linux.SOCK_RAW && level == linux.IPPROTO_IP {
@@ -955,7 +957,7 @@ func (s *SocketOperations) GetSockOpt(t *kernel.Task, level, name int, outPtr us
 			if err != nil {
 				return nil, err
 			}
-			return info, nil
+			return &info, nil
 
 		case linux.IPT_SO_GET_ENTRIES:
 			if outLen < linux.SizeOfIPTGetEntries {
@@ -970,7 +972,7 @@ func (s *SocketOperations) GetSockOpt(t *kernel.Task, level, name int, outPtr us
 			if err != nil {
 				return nil, err
 			}
-			return entries, nil
+			return &entries, nil
 
 		}
 	}
@@ -980,7 +982,7 @@ func (s *SocketOperations) GetSockOpt(t *kernel.Task, level, name int, outPtr us
 
 // GetSockOpt can be used to implement the linux syscall getsockopt(2) for
 // sockets backed by a commonEndpoint.
-func GetSockOpt(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, family int, skType linux.SockType, level, name, outLen int) (interface{}, *syserr.Error) {
+func GetSockOpt(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, family int, skType linux.SockType, level, name, outLen int) (marshal.Marshallable, *syserr.Error) {
 	switch level {
 	case linux.SOL_SOCKET:
 		return getSockOptSocket(t, s, ep, family, skType, name, outLen)
@@ -1013,7 +1015,7 @@ func boolToInt32(v bool) int32 {
 }
 
 // getSockOptSocket implements GetSockOpt when level is SOL_SOCKET.
-func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, family int, skType linux.SockType, name, outLen int) (interface{}, *syserr.Error) {
+func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, family int, skType linux.SockType, name, outLen int) (marshal.Marshallable, *syserr.Error) {
 	// TODO(b/124056281): Stop rejecting short optLen values in getsockopt.
 	switch name {
 	case linux.SO_ERROR:
@@ -1024,9 +1026,12 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		// Get the last error and convert it.
 		err := ep.GetSockOpt(tcpip.ErrorOption{})
 		if err == nil {
-			return int32(0), nil
+			optP := primitive.Int32(0)
+			return &optP, nil
 		}
-		return int32(syserr.TranslateNetstackError(err).ToLinux().Number()), nil
+
+		optP := primitive.Int32(syserr.TranslateNetstackError(err).ToLinux().Number())
+		return &optP, nil
 
 	case linux.SO_PEERCRED:
 		if family != linux.AF_UNIX || outLen < syscall.SizeofUcred {
@@ -1034,11 +1039,12 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		}
 
 		tcred := t.Credentials()
-		return syscall.Ucred{
-			Pid: int32(t.ThreadGroup().ID()),
-			Uid: uint32(tcred.EffectiveKUID.In(tcred.UserNamespace).OrOverflow()),
-			Gid: uint32(tcred.EffectiveKGID.In(tcred.UserNamespace).OrOverflow()),
-		}, nil
+		creds := linux.ControlMessageCredentials{
+			PID: int32(t.ThreadGroup().ID()),
+			UID: uint32(tcred.EffectiveKUID.In(tcred.UserNamespace).OrOverflow()),
+			GID: uint32(tcred.EffectiveKGID.In(tcred.UserNamespace).OrOverflow()),
+		}
+		return &creds, nil
 
 	case linux.SO_PASSCRED:
 		if outLen < sizeOfInt32 {
@@ -1049,7 +1055,9 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	case linux.SO_SNDBUF:
 		if outLen < sizeOfInt32 {
@@ -1065,7 +1073,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			size = math.MaxInt32
 		}
 
-		return int32(size), nil
+		sizeP := primitive.Int32(size)
+		return &sizeP, nil
 
 	case linux.SO_RCVBUF:
 		if outLen < sizeOfInt32 {
@@ -1081,7 +1090,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			size = math.MaxInt32
 		}
 
-		return int32(size), nil
+		sizeP := primitive.Int32(size)
+		return &sizeP, nil
 
 	case linux.SO_REUSEADDR:
 		if outLen < sizeOfInt32 {
@@ -1092,7 +1102,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	case linux.SO_REUSEPORT:
 		if outLen < sizeOfInt32 {
@@ -1103,7 +1114,9 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	case linux.SO_BINDTODEVICE:
 		var v tcpip.BindToDeviceOption
@@ -1111,7 +1124,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			return nil, syserr.TranslateNetstackError(err)
 		}
 		if v == 0 {
-			return []byte{}, nil
+			var b primitive.ByteSlice
+			return &b, nil
 		}
 		if outLen < linux.IFNAMSIZ {
 			return nil, syserr.ErrInvalidArgument
@@ -1126,7 +1140,9 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			// interface was removed.
 			return nil, syserr.ErrUnknownDevice
 		}
-		return append([]byte(nic.Name), 0), nil
+
+		name := primitive.ByteSlice(append([]byte(nic.Name), 0))
+		return &name, nil
 
 	case linux.SO_BROADCAST:
 		if outLen < sizeOfInt32 {
@@ -1137,7 +1153,9 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	case linux.SO_KEEPALIVE:
 		if outLen < sizeOfInt32 {
@@ -1148,13 +1166,17 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	case linux.SO_LINGER:
 		if outLen < linux.SizeOfLinger {
 			return nil, syserr.ErrInvalidArgument
 		}
-		return linux.Linger{}, nil
+
+		linger := linux.Linger{}
+		return &linger, nil
 
 	case linux.SO_SNDTIMEO:
 		// TODO(igudger): Linux allows shorter lengths for partial results.
@@ -1162,7 +1184,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			return nil, syserr.ErrInvalidArgument
 		}
 
-		return linux.NsecToTimeval(s.SendTimeout()), nil
+		sendTimeout := linux.NsecToTimeval(s.SendTimeout())
+		return &sendTimeout, nil
 
 	case linux.SO_RCVTIMEO:
 		// TODO(igudger): Linux allows shorter lengths for partial results.
@@ -1170,7 +1193,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			return nil, syserr.ErrInvalidArgument
 		}
 
-		return linux.NsecToTimeval(s.RecvTimeout()), nil
+		recvTimeout := linux.NsecToTimeval(s.RecvTimeout())
+		return &recvTimeout, nil
 
 	case linux.SO_OOBINLINE:
 		if outLen < sizeOfInt32 {
@@ -1182,7 +1206,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			return nil, syserr.TranslateNetstackError(err)
 		}
 
-		return int32(v), nil
+		vP := primitive.Int32(v)
+		return &vP, nil
 
 	case linux.SO_NO_CHECK:
 		if outLen < sizeOfInt32 {
@@ -1193,7 +1218,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	default:
 		socket.GetSockOptEmitUnimplementedEvent(t, name)
@@ -1202,7 +1228,7 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 }
 
 // getSockOptTCP implements GetSockOpt when level is SOL_TCP.
-func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interface{}, *syserr.Error) {
+func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (marshal.Marshallable, *syserr.Error) {
 	switch name {
 	case linux.TCP_NODELAY:
 		if outLen < sizeOfInt32 {
@@ -1213,7 +1239,9 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(!v), nil
+
+		vP := primitive.Int32(boolToInt32(!v))
+		return &vP, nil
 
 	case linux.TCP_CORK:
 		if outLen < sizeOfInt32 {
@@ -1224,7 +1252,9 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	case linux.TCP_QUICKACK:
 		if outLen < sizeOfInt32 {
@@ -1235,7 +1265,9 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	case linux.TCP_MAXSEG:
 		if outLen < sizeOfInt32 {
@@ -1246,8 +1278,8 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-
-		return int32(v), nil
+		vP := primitive.Int32(v)
+		return &vP, nil
 
 	case linux.TCP_KEEPIDLE:
 		if outLen < sizeOfInt32 {
@@ -1258,8 +1290,8 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		if err := ep.GetSockOpt(&v); err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-
-		return int32(time.Duration(v) / time.Second), nil
+		keepAliveIdle := primitive.Int32(time.Duration(v) / time.Second)
+		return &keepAliveIdle, nil
 
 	case linux.TCP_KEEPINTVL:
 		if outLen < sizeOfInt32 {
@@ -1270,8 +1302,8 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		if err := ep.GetSockOpt(&v); err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-
-		return int32(time.Duration(v) / time.Second), nil
+		keepAliveInterval := primitive.Int32(time.Duration(v) / time.Second)
+		return &keepAliveInterval, nil
 
 	case linux.TCP_KEEPCNT:
 		if outLen < sizeOfInt32 {
@@ -1282,8 +1314,8 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-
-		return int32(v), nil
+		vP := primitive.Int32(v)
+		return &vP, nil
 
 	case linux.TCP_USER_TIMEOUT:
 		if outLen < sizeOfInt32 {
@@ -1294,8 +1326,8 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		if err := ep.GetSockOpt(&v); err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-
-		return int32(time.Duration(v) / time.Millisecond), nil
+		tcpUserTimeout := primitive.Int32(time.Duration(v) / time.Millisecond)
+		return &tcpUserTimeout, nil
 
 	case linux.TCP_INFO:
 		var v tcpip.TCPInfoOption
@@ -1308,12 +1340,13 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		info := linux.TCPInfo{}
 
 		// Linux truncates the output binary to outLen.
-		ib := binary.Marshal(nil, usermem.ByteOrder, &info)
-		if len(ib) > outLen {
-			ib = ib[:outLen]
+		buf := t.CopyScratchBuffer(info.SizeBytes())
+		info.MarshalUnsafe(buf)
+		if len(buf) > outLen {
+			buf = buf[:outLen]
 		}
-
-		return ib, nil
+		bufP := primitive.ByteSlice(buf)
+		return &bufP, nil
 
 	case linux.TCP_CC_INFO,
 		linux.TCP_NOTSENT_LOWAT,
@@ -1343,7 +1376,9 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		}
 		b := make([]byte, toCopy)
 		copy(b, v)
-		return b, nil
+
+		bP := primitive.ByteSlice(b)
+		return &bP, nil
 
 	case linux.TCP_LINGER2:
 		if outLen < sizeOfInt32 {
@@ -1355,7 +1390,8 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 			return nil, syserr.TranslateNetstackError(err)
 		}
 
-		return int32(time.Duration(v) / time.Second), nil
+		lingerTimeout := primitive.Int32(time.Duration(v) / time.Second)
+		return &lingerTimeout, nil
 
 	case linux.TCP_DEFER_ACCEPT:
 		if outLen < sizeOfInt32 {
@@ -1367,7 +1403,8 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 			return nil, syserr.TranslateNetstackError(err)
 		}
 
-		return int32(time.Duration(v) / time.Second), nil
+		tcpDeferAccept := primitive.Int32(time.Duration(v) / time.Second)
+		return &tcpDeferAccept, nil
 
 	case linux.TCP_SYNCNT:
 		if outLen < sizeOfInt32 {
@@ -1378,8 +1415,8 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-
-		return int32(v), nil
+		vP := primitive.Int32(v)
+		return &vP, nil
 
 	case linux.TCP_WINDOW_CLAMP:
 		if outLen < sizeOfInt32 {
@@ -1390,8 +1427,8 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-
-		return int32(v), nil
+		vP := primitive.Int32(v)
+		return &vP, nil
 	default:
 		emitUnimplementedEventTCP(t, name)
 	}
@@ -1399,7 +1436,7 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 }
 
 // getSockOptIPv6 implements GetSockOpt when level is SOL_IPV6.
-func getSockOptIPv6(t *kernel.Task, ep commonEndpoint, name, outLen int) (interface{}, *syserr.Error) {
+func getSockOptIPv6(t *kernel.Task, ep commonEndpoint, name, outLen int) (marshal.Marshallable, *syserr.Error) {
 	switch name {
 	case linux.IPV6_V6ONLY:
 		if outLen < sizeOfInt32 {
@@ -1410,7 +1447,9 @@ func getSockOptIPv6(t *kernel.Task, ep commonEndpoint, name, outLen int) (interf
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	case linux.IPV6_PATHMTU:
 		t.Kernel().EmitUnimplementedEvent(t)
@@ -1418,21 +1457,24 @@ func getSockOptIPv6(t *kernel.Task, ep commonEndpoint, name, outLen int) (interf
 	case linux.IPV6_TCLASS:
 		// Length handling for parity with Linux.
 		if outLen == 0 {
-			return make([]byte, 0), nil
+			var b primitive.ByteSlice
+			return &b, nil
 		}
 		v, err := ep.GetSockOptInt(tcpip.IPv6TrafficClassOption)
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
 
-		uintv := uint32(v)
+		uintv := primitive.Uint32(v)
 		// Linux truncates the output binary to outLen.
-		ib := binary.Marshal(nil, usermem.ByteOrder, &uintv)
+		ib := t.CopyScratchBuffer(uintv.SizeBytes())
+		uintv.MarshalUnsafe(ib)
 		// Handle cases where outLen is lesser than sizeOfInt32.
 		if len(ib) > outLen {
 			ib = ib[:outLen]
 		}
-		return ib, nil
+		ibP := primitive.ByteSlice(ib)
+		return &ibP, nil
 
 	case linux.IPV6_RECVTCLASS:
 		if outLen < sizeOfInt32 {
@@ -1443,7 +1485,9 @@ func getSockOptIPv6(t *kernel.Task, ep commonEndpoint, name, outLen int) (interf
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	default:
 		emitUnimplementedEventIPv6(t, name)
@@ -1452,7 +1496,7 @@ func getSockOptIPv6(t *kernel.Task, ep commonEndpoint, name, outLen int) (interf
 }
 
 // getSockOptIP implements GetSockOpt when level is SOL_IP.
-func getSockOptIP(t *kernel.Task, ep commonEndpoint, name, outLen int, family int) (interface{}, *syserr.Error) {
+func getSockOptIP(t *kernel.Task, ep commonEndpoint, name, outLen int, family int) (marshal.Marshallable, *syserr.Error) {
 	switch name {
 	case linux.IP_TTL:
 		if outLen < sizeOfInt32 {
@@ -1465,11 +1509,12 @@ func getSockOptIP(t *kernel.Task, ep commonEndpoint, name, outLen int, family in
 		}
 
 		// Fill in the default value, if needed.
-		if v == 0 {
-			v = DefaultTTL
+		vP := primitive.Int32(v)
+		if vP == 0 {
+			vP = DefaultTTL
 		}
 
-		return int32(v), nil
+		return &vP, nil
 
 	case linux.IP_MULTICAST_TTL:
 		if outLen < sizeOfInt32 {
@@ -1481,7 +1526,8 @@ func getSockOptIP(t *kernel.Task, ep commonEndpoint, name, outLen int, family in
 			return nil, syserr.TranslateNetstackError(err)
 		}
 
-		return int32(v), nil
+		vP := primitive.Int32(v)
+		return &vP, nil
 
 	case linux.IP_MULTICAST_IF:
 		if outLen < len(linux.InetAddr{}) {
@@ -1495,7 +1541,7 @@ func getSockOptIP(t *kernel.Task, ep commonEndpoint, name, outLen int, family in
 
 		a, _ := ConvertAddress(linux.AF_INET, tcpip.FullAddress{Addr: v.InterfaceAddr})
 
-		return a.(*linux.SockAddrInet).Addr, nil
+		return &a.(*linux.SockAddrInet).Addr, nil
 
 	case linux.IP_MULTICAST_LOOP:
 		if outLen < sizeOfInt32 {
@@ -1506,21 +1552,26 @@ func getSockOptIP(t *kernel.Task, ep commonEndpoint, name, outLen int, family in
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	case linux.IP_TOS:
 		// Length handling for parity with Linux.
 		if outLen == 0 {
-			return []byte(nil), nil
+			var b primitive.ByteSlice
+			return &b, nil
 		}
 		v, err := ep.GetSockOptInt(tcpip.IPv4TOSOption)
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
 		if outLen < sizeOfInt32 {
-			return uint8(v), nil
+			vP := primitive.Uint8(v)
+			return &vP, nil
 		}
-		return int32(v), nil
+		vP := primitive.Int32(v)
+		return &vP, nil
 
 	case linux.IP_RECVTOS:
 		if outLen < sizeOfInt32 {
@@ -1531,7 +1582,9 @@ func getSockOptIP(t *kernel.Task, ep commonEndpoint, name, outLen int, family in
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	case linux.IP_PKTINFO:
 		if outLen < sizeOfInt32 {
@@ -1542,7 +1595,9 @@ func getSockOptIP(t *kernel.Task, ep commonEndpoint, name, outLen int, family in
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
-		return boolToInt32(v), nil
+
+		vP := primitive.Int32(boolToInt32(v))
+		return &vP, nil
 
 	default:
 		emitUnimplementedEventIP(t, name)
